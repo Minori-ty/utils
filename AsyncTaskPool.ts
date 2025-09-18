@@ -1,92 +1,78 @@
+type Task<T> = () => Promise<T>;
+
 class AsyncTaskPool<T = any> {
-    // 最大并发数，默认为3
-    private maxConcurrency: number;
-    // 等待执行的任务队列
-    private waitingTasks: Array<() => Promise<T>> = [];
-    // 当前正在执行的任务数量
-    private runningTasks: number = 0;
-    // 已完成的任务结果
+    /** 最大并发数 */
+    private concurrency: number;
+    /** 当前正在运行的任务数量 */
+    private runningCount = 0;
+    /** 任务队列 */
+    private taskQueue: Task<T>[] = [];
+    /** 已完成任务的结果 */
     private results: T[] = [];
-    // 所有任务是否都已完成
-    private allCompleted: boolean = false;
-    // 用于等待所有任务完成的Promise
-    private completionPromise: Promise<T[]>;
-    private resolveCompletion!: (results: T[]) => void;
-    private rejectCompletion!: (error: Error) => void;
+    /** 是否已完成所有任务 */
+    private finished = false;
+    /** 等待所有任务完成的 Promise 的 resolve 回调列表 */
+    private pendingResolvers: (() => void)[] = [];
 
-    constructor(maxConcurrency: number = 3) {
-        if (maxConcurrency < 1) {
-            throw new Error('最大并发数必须至少为1');
+    constructor(concurrency = 3) {
+        this.concurrency = concurrency;
+    }
+
+    /** 添加任务 */
+    add(task: Task<T>) {
+        if (this.finished) {
+            throw new Error('任务池已关闭，不能再添加任务');
         }
-        this.maxConcurrency = maxConcurrency;
-        this.completionPromise = new Promise((resolve, reject) => {
-            this.resolveCompletion = resolve;
-            this.rejectCompletion = reject;
-        });
+        this.taskQueue.push(task);
+        this.runNext();
     }
 
     /**
-     * 添加任务到任务池
-     * @param task 异步任务函数
+     * 内部调度器
      */
-    addTask(task: () => Promise<T>): void {
-        if (this.allCompleted) {
-            throw new Error('所有任务已完成，无法添加新任务');
-        }
-        this.waitingTasks.push(task);
-        // 尝试执行任务
-        this.runTasks().catch(this.rejectCompletion);
-    }
-
-    /**
-     * 执行任务队列中的任务
-     */
-    private async runTasks(): Promise<void> {
-        // 当有可用并发槽且有等待任务时，继续执行
+    private runNext() {
         while (
-            this.runningTasks < this.maxConcurrency &&
-            this.waitingTasks.length > 0
+            this.runningCount < this.concurrency &&
+            this.taskQueue.length > 0
         ) {
-            const task = this.waitingTasks.shift();
-            if (!task) continue;
+            const task = this.taskQueue.shift()!;
+            this.runningCount++;
 
-            this.runningTasks++;
-
-            try {
-                // 执行任务并获取结果
-                const result = await task();
-                this.results.push(result);
-            } catch (error) {
-                console.error('任务执行失败，将重试:', error);
-                // 任务失败，重新添加到队列尾部
-                this.waitingTasks.push(task);
-            } finally {
-                this.runningTasks--;
-                // 检查是否所有任务都已完成
-                this.checkAllCompleted();
-            }
+            task()
+                .then(res => {
+                    this.results.push(res);
+                })
+                .catch(() => {
+                    // 失败重试，重新丢回队列
+                    this.taskQueue.push(task);
+                })
+                .finally(() => {
+                    this.runningCount--;
+                    this.runNext();
+                    this.checkIfDone();
+                });
         }
     }
 
     /**
-     * 检查是否所有任务都已完成
+     * 判断是否所有任务都完成
      */
-    private checkAllCompleted(): void {
-        if (
-            this.runningTasks === 0 &&
-            this.waitingTasks.length === 0 &&
-            !this.allCompleted
-        ) {
-            this.allCompleted = true;
-            this.resolveCompletion(this.results);
+    private checkIfDone() {
+        if (this.runningCount === 0 && this.taskQueue.length === 0) {
+            this.finished = true;
+            this.pendingResolvers.forEach(resolve => resolve());
+            this.pendingResolvers = [];
         }
     }
 
     /**
+     *
      * 等待所有任务完成
-     * @returns 所有任务成功完成后的结果数组
      */
-    waitForAll(): Promise<T[]> {
-        return this.completionPromise;
+    async awaitAll(): Promise<T[]> {
+        if (this.finished) return this.results;
+        return new Promise<T[]>(resolve => {
+            this.pendingResolvers.push(() => resolve(this.results));
+        });
     }
 }
