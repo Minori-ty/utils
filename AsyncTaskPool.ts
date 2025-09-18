@@ -76,3 +76,29 @@ class AsyncTaskPool<T = any> {
         });
     }
 }
+
+// 模拟异步任务
+function createTask(id: number): () => Promise<string> {
+    return async () => {
+        console.log(`任务 ${id} 开始`);
+        await new Promise(r => setTimeout(r, Math.random() * 2000 + 1000));
+        if (Math.random() < 0.3) {
+            // 30% 概率失败
+            console.log(`任务 ${id} 失败，重试中...`);
+            throw new Error('失败');
+        }
+        // console.log(`任务 ${id} 成功`);
+        return `结果-${id}`;
+    };
+}
+
+(async () => {
+    const pool = new AsyncTaskPool<string>(3);
+
+    for (let i = 1; i <= 10; i++) {
+        pool.add(createTask(i));
+    }
+
+    const results = await pool.awaitAll();
+    console.log('所有任务完成 ✅', results);
+})();
